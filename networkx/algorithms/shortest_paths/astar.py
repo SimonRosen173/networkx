@@ -138,6 +138,130 @@ def astar_path(G, source, target, heuristic=None, weight="weight"):
     raise nx.NetworkXNoPath(f"Node {target} not reachable from {source}")
 
 
+def cooperative_astar_path(G, sources, targets, heuristic=None, weight="weight", resv_tbl=None, start_t=0):
+    assert len(sources) == len(targets), "Length of sources must equal length of targets"
+
+    for source, target in zip(sources, targets):
+        if source not in G or target not in G:
+            msg = f"Either source {source} or target {target} is not in G"
+            raise nx.NodeNotFound(msg)
+
+    if heuristic is None:
+        # The default heuristic is h=0 - same as Dijkstra's algorithm
+        def heuristic(u, v):
+            return 0
+
+    no_agents = len(sources)
+    paths = []
+    if resv_tbl is None:
+        resv_tbl = set()
+    max_t = start_t
+
+    push = heappush
+    pop = heappop
+    weight = _weight_function(G, weight)
+
+    for agent_ind, (source, target) in enumerate(zip(sources, targets)):
+
+        # The queue stores priority, node, cost to reach, and parent.
+        # Uses Python heapq to keep in priority order.
+        # Add a counter to the queue to prevent the underlying heap from
+        # attempting to compare the nodes themselves. The hash breaks ties in the
+        # priority and is guaranteed unique for all nodes in the graph.
+        # curnode consists of tuple of current node and time spent at node
+        # e.g. ((0,0), 1) signifies agent has spent 1 timestep at (0, 0)
+        c = count()
+        queue = [(0, next(c), (source, 0), start_t, 0, None)]  # _, __, curnode, t, dist, parent
+
+        # Maps enqueued nodes to distance of discovered paths and the
+        # computed heuristics to target. We avoid computing the heuristics
+        # more than once and inserting the node into the queue too many times.
+        enqueued = {}
+        # Maps explored nodes to parent closest to the source.
+        explored = {}
+        path_found = False
+
+        while queue and not path_found:
+            # Pop the smallest item from queue.
+            _, __, curnode, t, dist, parent = pop(queue)
+            if agent_ind == 1:
+                print(curnode)
+
+            # If target found
+            if curnode[0] == target:
+                path = [curnode]
+                node = parent
+                while node is not None:
+                    path.append(node)
+                    node = explored[node]
+
+                path = [el[0] for el in path]
+
+                path.reverse()
+
+                paths.append(path)
+                path_found = True
+                curr_t = start_t
+                resv_tbl.add((path[0], curr_t))
+                for i in range(1, len(path)):
+                    prev_node = path[i-1]
+                    curr_node = path[i]
+                    if prev_node != curr_node:
+                        w = weight(prev_node, curnode, G.get_edge_data(prev_node, curr_node))
+                    else:
+                        w = 1
+                    curr_t += w
+                    resv_tbl.add((curr_node, curr_t))
+
+                max_t = max(max_t, curr_t)
+
+                break
+
+            if curnode in explored:
+                # Do not override the parent of starting node
+                if explored[curnode] is None:
+                    continue
+
+                # Skip bad paths that were enqueued before finding a better one
+                qcost, h = enqueued[curnode]
+                if qcost < dist:  # No idea if this is correct
+                    continue
+
+            explored[curnode] = parent
+
+            # Allow for wait action where agent does not move
+            neighbors = [(node, 0) for node in G[curnode[0]].items()]
+            tmp = neighbors + [((curnode[0], {'weight': 0}), curnode[1] + 1)]
+
+            for (neighbor, w), time_at in tmp:
+                # + 1 to account for moving out of current node
+                # if (neighbor, t + weight(curnode[0], neighbor, w)) not in resv_tbl:
+                if (neighbor, start_t + dist + weight(curnode[0], neighbor, w)) not in resv_tbl:
+                    # do stuff
+                    ncost = dist + weight(curnode[0], neighbor, w) + time_at
+                    if (neighbor, time_at) in enqueued:
+                        qcost, h = enqueued[(neighbor, time_at)]
+                        # if qcost <= ncost, a less costly path from the
+                        # neighbor to the source was already determined.
+                        # Therefore, we won't attempt to push this neighbor
+                        # to the queue
+                        if qcost <= ncost:
+                            continue
+                    else:
+                        h = heuristic(neighbor, target)
+                    enqueued[(neighbor, time_at)] = ncost, h
+
+                    # if neighbor[0] == curnode[0]:  # t must be incremented if wait action is taken
+                    #     t += 1
+
+                    push(queue, (ncost + h, next(c), (neighbor, time_at), t + weight(curnode, neighbor, w), ncost, curnode))
+
+        if not path_found:
+            raise nx.NetworkXNoPath(f"Node {target} not reachable from {source} for agent {agent_ind}")
+
+    return paths, resv_tbl, max_t
+
+
 def astar_path_length(G, source, target, heuristic=None, weight="weight"):
     """Returns the length of the shortest path between source and target using
     the A* ("A-star") algorithm.
@@ -185,3 +309,23 @@ def astar_path_length(G, source, target, heuristic=None, weight="weight"):
     weight = _weight_function(G, weight)
     path = astar_path(G, source, target, heuristic, weight)
     return sum(weight(u, v, G[u][v]) for u, v in zip(path[:-1], path[1:]))
+
+
+if __name__ == "__main__":
+    def man_dist(node1, node2):
+        return abs(node1[0] - node2[0]) + abs(node1[1] - node2[1])
+
+    tmp_G = nx.grid_2d_graph(7, 2)
+    for u, v, d in tmp_G.edges(data=True):
+        d['weight'] = 1
+
+    tmp_G.remove_nodes_from([(0, 1), (1, 1), (2, 1), (3, 1), (5, 1), (6, 1)])
+
+    sources = [(0, 0), (6, 0)]
+    targets = [(6, 0), (0, 0)]
+
+    paths, _, _ = cooperative_astar_path(tmp_G, sources, targets, heuristic=man_dist)
+
+    for path in paths:
+        print(path)
+    # print(paths)
